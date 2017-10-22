@@ -126,6 +126,15 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
   pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
   if(!pdata) return -ENOMEM;
 
+  // Get the clock and start it up (prepare and enable)
+  pdata->clk = devm_clk_get(&pdev->dev, NULL);
+  if(IS_ERR(pdata->clk)) {
+    printk(KERN_ERR "Failed to get clock\n");
+    return PTR_ERR(pdata->clk);
+  }
+  ret = clk_prepare_enable(pdata->clk);
+  if(ret) return ret;
+
   // Get the parameters we want from the device tree
   ret = of_property_read_u32(np, "num-leds", &pdata->num_leds);
   if(ret < 0) {
@@ -170,15 +179,6 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
 
   setup_strip(pdata);
   
-  // Get the clock and start it up (prepare and enable)
-  pdata->clk = devm_clk_get(&pdev->dev, NULL);
-  if(IS_ERR(pdata->clk)) {
-    printk(KERN_ERR "Failed to get clock\n");
-    return PTR_ERR(pdata->clk);
-  }
-  ret = clk_prepare_enable(pdata->clk);
-  if(ret) return ret;
-
   // finally set the data and return
   platform_set_drvdata(pdev, pdata);
   printk(KERN_INFO "finished probing RGBW strip driver\n");  

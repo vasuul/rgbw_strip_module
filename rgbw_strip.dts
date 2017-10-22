@@ -13,7 +13,7 @@
         pinctrl-names = "default";
         pinctrl-0 = <&rgbw_strip_pins>;
         num-leds = <32>;
-        assigned-clock-rates = <1000000>;
+        assigned-clock-rates = <3333333>;
         dmas = <&dma 5>;
         dma-names = "fifo-dma";
         status = "okay";
