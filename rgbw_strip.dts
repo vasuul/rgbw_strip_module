@@ -1,0 +1,33 @@
+
+/dts-v1/;
+/plugin/;
+
+/ {
+  compatible = "brcm,bcm2708";
+
+  fragment@0 {
+    target = <&pwm>;
+    __overlay__ {
+        // We use our own driver name here to steal it from the kernel driver
+        compatible = "xulne,rgbw-strip";
+        pinctrl-names = "default";
+        pinctrl-0 = <&rgbw_strip_pins>;
+        num-leds = <32>;
+        assigned-clock-rates = <1000000>;
+        dmas = <&dma 5>;
+        dma-names = "fifo-dma";
+        status = "okay";
+    };
+  };
+
+  fragment@1 {
+    target = <&gpio>;
+    __overlay__ {
+      rgbw_strip_pins: rgbw_strip_pins {
+        // We need one pin, the PWM one
+        brcm,pins = <18>;
+        brcm,function = <2>; // Alt5
+      };
+    };
+  };
+};
