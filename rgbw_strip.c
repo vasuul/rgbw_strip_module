@@ -333,15 +333,14 @@ static int setup_dev(struct rgbw_strip_platform_data *dev) {
 }
 
 static int rgbw_strip_probe(struct platform_device *pdev) {
-  int ret = 0;
+  int ret = 0, i, indx;
   struct resource *addr = 0;  
-    
+  uint32_t rc[4];
 #if USE_DMA
   dma_addr_t phy_addr;
   struct dma_slave_config dma_sconfig;
 #endif
   
-  struct rgbw_strip_platform_data *pdata = NULL;
   struct device_node *np = pdev->dev.of_node;
   
   if(!of_have_populated_dt()) {
@@ -351,12 +350,12 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
   g_dev.device = &pdev->dev;
 
   // Get the clock and start it up (prepare and enable)
-  pdata->clk = devm_clk_get(&pdev->dev, NULL);
-  if(IS_ERR(pdata->clk)) {
+  g_dev.clk = devm_clk_get(&pdev->dev, NULL);
+  if(IS_ERR(g_dev.clk)) {
     printk(KERN_ERR "Failed to get clock\n");
-    return PTR_ERR(pdata->clk);
+    return PTR_ERR(g_dev.clk);
   }
-  ret = clk_prepare_enable(pdata->clk);
+  ret = clk_prepare_enable(g_dev.clk);
   if(ret) return ret;
 
   // Get the parameters we want from the device tree
@@ -366,7 +365,13 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
     g_dev.num_leds = 32;
     ret = 0;
   }
-  printk(KERN_INFO "Initialized with %d LEDS\n", g_dev.num_leds);
+  ret = of_property_read_u32_array(np, "reset-color", rc, 4);
+  if(ret < 0) {
+    printk(KERN_ERR "Could not get reset color\n");
+    rc[0] = rc[1] = rc[2] = rc[3] = 0;
+    ret = 0;
+  }
+  printk(KERN_INFO "Initialized with %d LEDS color(%u %u %u %u)\n", g_dev.num_leds, rc[0], rc[1], rc[2], rc[3]);
 
   // Allocate enough space for +1 leds so that the last one can always be zero
   //  *4 here because every bit in the led color takes 4 bits in pwm
@@ -374,6 +379,13 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
   if(!g_dev.leds) {
     printk(KERN_ERR "Could not allocate space for %d leds\n", g_dev.num_leds);
     return -ENOMEM;
+  }
+  indx = 0;
+  for(i = 0; i < g_dev.num_leds + 1; i++) {
+    g_dev.leds[indx++] = make_pwm_bits(rc[0]);
+    g_dev.leds[indx++] = make_pwm_bits(rc[1]);
+    g_dev.leds[indx++] = make_pwm_bits(rc[2]);
+    g_dev.leds[indx++] = make_pwm_bits(rc[3]);
   }
   
   // Get pointers to the PWM peripheral memory
@@ -405,13 +417,13 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
 #endif
 
   // Initialize the hardware
-  setup_strip(pdata);
+  setup_strip(&g_dev);
 
   // Setup our device node
-  setup_dev(pdata);
+  setup_dev(&g_dev);
   
   // finally set the data and return
-  platform_set_drvdata(pdev, pdata);
+  platform_set_drvdata(pdev, &g_dev);
   printk(KERN_INFO "finished probing RGBW strip driver\n");  
   return ret;
 }
