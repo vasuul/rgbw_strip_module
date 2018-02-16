@@ -12,8 +12,10 @@
         compatible = "xulne,rgbw-strip";
         pinctrl-names = "default";
         pinctrl-0 = <&rgbw_strip_pins>;
-        num-leds = <32>;
-        reset-color = <0 0 0 100>;
+        // 106 Leds per strip on my lamp
+        num-leds = <848>;
+        // On reset, set first 10 leds to (r:0, g:0, b:0, w:100) 
+        reset-color = <0 0 0 100 10>;
         assigned-clock-rates = <3333333>;
         dmas = <&dma 5>;
         dma-names = "fifo-dma";

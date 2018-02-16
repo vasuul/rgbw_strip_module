@@ -1,35 +1,17 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
-//#include <linux/types.h>
 #include <linux/interrupt.h>
-//#include <linux/fcntl.h>
 #include <linux/init.h>
-//#include <linux/proc_fs.h>
-//#include <linux/sysfs.h>
-//#include <linux/mutex.h>
-//#include <linux/sysctl.h>
-//#include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/platform_device.h>
-//#include <linux/slab.h>
 #include <asm/uaccess.h>
-//#include <linux/semaphore.h>
-//#include <linux/ioport.h>
-//#include <asm/io.h>
 #include <linux/delay.h>
 #include <linux/clk.h>
-//#include <linux/device.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_gpio.h>
 #include <linux/of_irq.h>
 #include <linux/dmaengine.h>
-//#include <linux/clk-provider.h>
-//#include <linux/err.h>
-//#include <linux/wait.h>
-//#include <linux/kthread.h>
-//#include <linux/poll.h>
-//#include <asm/gpio.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Maxwell Walter");
@@ -64,6 +46,7 @@ struct rgbw_strip_platform_data {
 #define CTL_OFFSET    0x00
 #define PWM_EN_1      (1<<0)
 #define MODE_SERIAL_1 (1<<1)
+#define REPEAT_1      (1<<2)
 #define USE_FIFO_1    (1<<5)
 
 #define STA_OFFSET    0x04
@@ -71,13 +54,21 @@ struct rgbw_strip_platform_data {
 #define DAT1_OFFSET   0x14
 #define FIFO_OFFSET   0x18
 
+// Each LED is 20 mA according to the documentation
+//  And our power supply is 30 amp, so say 25 to be safe
+//  We also have to power the pi and we want some margin
+// TODO: Make the power supply a parameter to set in the device tree
+//       That makes it easier to change
+#define MA_LED 20
+#define MAX_CURRENT_MA (25 * 1000)
+
 static void send_pwm_buf(struct rgbw_strip_platform_data *dat) {
   // Basically just keep pumping data into the FIFO until there is no
   //  more data left
-  int i, buf_len = (dat->num_leds + 1) * 4;
+  int i, buf_len = (dat->num_leds * 4) + 1;
   uint32_t sr;
-  dat->leds[dat->num_leds] = 0; // Just to make sure
-  for(i = 0; i < buf_len; i++) {
+  dat->leds[buf_len - 1] = 0; // Just to make sure
+  for(i = 0; i < buf_len;) {
     sr = readl(dat->pwm_base + STA_OFFSET);
     if(sr & 0xC) {
       // This is an error...
@@ -85,12 +76,12 @@ static void send_pwm_buf(struct rgbw_strip_platform_data *dat) {
       return;
     } else if(sr & 0x1) {
       // FIFO is full so we have to wait
-      //  It takes ~1.2us per bit, so ~38us per word and the FIFO is 16 deep
-      //  Delay between 1 and 12 FIFO elements
-      usleep_range(40, 460);
+      //  It takes ~1.2us per 4 bits, so ~9.6us per word and the FIFO is 16 deep
+      //  Delay between 2 and 10 FIFO elements
+      //usleep_range(10, 50);
     } else {
       // Put something in to the FIFO
-      writel(dat->leds[i], dat->pwm_base + FIFO_OFFSET);
+      writel(dat->leds[i++], dat->pwm_base + FIFO_OFFSET);
     }
   }
 }
@@ -109,7 +100,11 @@ static int rgbw_strip_release(struct inode *inode, struct file *fp) {
     return 0;
 }
 
-static uint8_t bit_values[] = {0xCC, 0x8C, 0xC8, 0x88};
+static uint8_t bit_values[] = {0x88, 0x8C, 0xC8, 0xCC};
+// 0xC = 1100
+// 0x8 = 1000
+// LED 1 = 1100 = C
+// LED 0 = 1000 = 8
 static inline uint32_t make_pwm_bits(uint8_t val) {
   // MSB first
   uint32_t tmp =
@@ -137,6 +132,8 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
   {
     rgbw_render_t *cmd = devm_kmalloc(dat->device, sizeof(rgbw_render_t), GFP_KERNEL);
     rgbw_led_t *payload = NULL;
+    uint arr_start = 0, arr_end = 0, arr_size = 0;
+    uint ma_used;
     if(!cmd) {
       ret = -ENOMEM;
       break;
@@ -174,16 +171,49 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
         ret = -EIO;
         break;
       }
+
+      arr_start = cmd->offset * 4;
+      arr_end = arr_start + cmd->count * 4;
+      arr_size = dat->num_leds * 4;
+
+      // Make sure we won't use too much power
+      ma_used = 0;
+      for(i = 0; i < cmd->count; i++) {
+        if(payload[i].r != 0) ma_used += MA_LED;
+        if(payload[i].g != 0) ma_used += MA_LED;
+        if(payload[i].b != 0) ma_used += MA_LED;
+        if(payload[i].w != 0) ma_used += MA_LED;
+      }
+      for(i = 0; i < arr_size;) {
+        uint32_t val = dat->leds[i++];
+
+        // Don't count the LEDS we are going to change
+        if(i >= arr_start && i < arr_end) {
+          if(val != bit_values[0]) {ma_used += MA_LED;}
+        }
+      }
+      if(ma_used > MAX_CURRENT_MA) {
+        // No good
+        printk(KERN_DEBUG "Too much current (%d > %d)", ma_used, MAX_CURRENT_MA);
+        ret = -EINVAL;
+        break;
+      } else {
+        printk(KERN_DEBUG "Current used %d", ma_used);
+      }
       
       // Then process the color data into PWM data
-      indx = cmd->offset * 4;
+      indx = arr_start;
       for(i = 0; i < cmd->count; i++) {
-        dat->leds[indx++] = make_pwm_bits(payload[i].r);
+        // R and G seem switched based on what is in the datasheet
         dat->leds[indx++] = make_pwm_bits(payload[i].g);
+        dat->leds[indx++] = make_pwm_bits(payload[i].r);
         dat->leds[indx++] = make_pwm_bits(payload[i].b);
         dat->leds[indx++] = make_pwm_bits(payload[i].w);
       }
+      devm_kfree(dat->device, payload);
     }
+    devm_kfree(dat->device, cmd);
+
 
     // Then send the buffer to the PWM
     send_pwm_buf(dat);
@@ -243,10 +273,11 @@ static int rgbw_strip_remove(struct platform_device *dev) {
 
 static int setup_strip(struct rgbw_strip_platform_data *pdata) {
   // Control register
-  uint32_t ctl_reg = MODE_SERIAL_1 | USE_FIFO_1;
+  uint32_t ctl_reg = MODE_SERIAL_1 | REPEAT_1 | USE_FIFO_1;
   uint32_t range_reg = 32;
   
   // Write the range and the control values we set up
+  writel(0, pdata->pwm_base + FIFO_OFFSET);
   writel(range_reg, pdata->pwm_base + RNG1_OFFSET);
   writel(ctl_reg, pdata->pwm_base + CTL_OFFSET);
   
@@ -335,7 +366,7 @@ static int setup_dev(struct rgbw_strip_platform_data *dev) {
 static int rgbw_strip_probe(struct platform_device *pdev) {
   int ret = 0, i, indx;
   struct resource *addr = 0;  
-  uint32_t rc[4];
+  uint32_t rc[5], num_lit = 0;
 #if USE_DMA
   dma_addr_t phy_addr;
   struct dma_slave_config dma_sconfig;
@@ -365,29 +396,49 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
     g_dev.num_leds = 32;
     ret = 0;
   }
-  ret = of_property_read_u32_array(np, "reset-color", rc, 4);
+  ret = of_property_read_u32_array(np, "reset-color", rc, 5);
   if(ret < 0) {
     printk(KERN_ERR "Could not get reset color\n");
-    rc[0] = rc[1] = rc[2] = rc[3] = 0;
+    rc[0] = rc[1] = rc[2] = rc[3] = rc[4] = 0;
     ret = 0;
   }
-  printk(KERN_INFO "Initialized with %d LEDS color(%u %u %u %u)\n", g_dev.num_leds, rc[0], rc[1], rc[2], rc[3]);
+  printk(KERN_INFO "Initialized with %d of %d LEDS color(%u %u %u %u)\n", rc[4], g_dev.num_leds, rc[0], rc[1], rc[2], rc[3]);
 
-  // Allocate enough space for +1 leds so that the last one can always be zero
+  num_lit = 0;
+  if(rc[0] != 0) num_lit++;
+  if(rc[1] != 0) num_lit++;
+  if(rc[2] != 0) num_lit++;
+  if(rc[3] != 0) num_lit++;
+  if(num_lit * rc[4] * MA_LED > MAX_CURRENT_MA) {
+    printk(KERN_WARNING "Default LEDS requre too much current (%d > %d)", num_lit * rc[4] * MA_LED, MAX_CURRENT_MA);
+    rc[0] = rc[1] = rc[2] = rc[3] = rc[4] = 0;    
+  }
+  printk(KERN_INFO "Estimated default current usage: %dmA of %dMa", num_lit * rc[4] * MA_LED, MAX_CURRENT_MA);
+      
+  // Allocate enough space for +1 so that the last byte can always be zero
   //  *4 here because every bit in the led color takes 4 bits in pwm
-  g_dev.leds = devm_kzalloc(&pdev->dev, sizeof(uint32_t) * (g_dev.num_leds + 1) * 4, GFP_KERNEL);
+  g_dev.leds = devm_kzalloc(&pdev->dev, sizeof(uint32_t) * (g_dev.num_leds * 4) + 1, GFP_KERNEL);
   if(!g_dev.leds) {
     printk(KERN_ERR "Could not allocate space for %d leds\n", g_dev.num_leds);
     return -ENOMEM;
   }
   indx = 0;
-  for(i = 0; i < g_dev.num_leds + 1; i++) {
-    g_dev.leds[indx++] = make_pwm_bits(rc[0]);
-    g_dev.leds[indx++] = make_pwm_bits(rc[1]);
-    g_dev.leds[indx++] = make_pwm_bits(rc[2]);
-    g_dev.leds[indx++] = make_pwm_bits(rc[3]);
+  for(i = 0; i < g_dev.num_leds; i++) {
+    if(i < rc[4]) {
+      g_dev.leds[indx++] = make_pwm_bits(rc[0]);
+      g_dev.leds[indx++] = make_pwm_bits(rc[1]);
+      g_dev.leds[indx++] = make_pwm_bits(rc[2]);
+      g_dev.leds[indx++] = make_pwm_bits(rc[3]);
+    } else {
+      g_dev.leds[indx++] = make_pwm_bits(0);
+      g_dev.leds[indx++] = make_pwm_bits(0);
+      g_dev.leds[indx++] = make_pwm_bits(0);
+      g_dev.leds[indx++] = make_pwm_bits(0);
+    }
   }
-  
+  // do the last one which needs to be zero
+  g_dev.leds[indx++] = 0;
+
   // Get pointers to the PWM peripheral memory
   addr = platform_get_resource(pdev, IORESOURCE_MEM, 0);
   g_dev.pwm_base = devm_ioremap_resource(&pdev->dev, addr);
@@ -424,6 +475,8 @@ static int rgbw_strip_probe(struct platform_device *pdev) {
   
   // finally set the data and return
   platform_set_drvdata(pdev, &g_dev);
+
+  send_pwm_buf(&g_dev);
   printk(KERN_INFO "finished probing RGBW strip driver\n");  
   return ret;
 }
