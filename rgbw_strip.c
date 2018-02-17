@@ -62,22 +62,39 @@ struct rgbw_strip_platform_data {
 #define MA_LED 20
 #define MAX_CURRENT_MA (25 * 1000)
 
-static void send_pwm_buf(struct rgbw_strip_platform_data *dat) {
+static int send_pwm_buf(struct rgbw_strip_platform_data *dat) {
   // Basically just keep pumping data into the FIFO until there is no
   //  more data left
   int i, buf_len = (dat->num_leds * 4) + 1;
-  uint32_t sr;
+  uint32_t sr, arr_size, ma_used = 0;
   dat->leds[buf_len - 1] = 0; // Just to make sure
+
+  // Check power consumption
+  arr_size = dat->num_leds * 4;  
+  for(i = 0; i < arr_size;) {
+    if(dat->leds[i++] != bit_values[0]) ma_used += MA_LED;
+  }
+  if(ma_used > MAX_CURRENT_MA) {
+    // No good
+    printk(KERN_DEBUG "Too much current (%d > %d)", ma_used, MAX_CURRENT_MA);
+    return -EINVAL;
+  } else {
+    printk(KERN_INFO "Current used %d", ma_used);
+  }
+
+  // Send it off it we are good
   for(i = 0; i < buf_len;) {
     sr = readl(dat->pwm_base + STA_OFFSET);
     if(sr & 0xC) {
       // This is an error...
       printk(KERN_ERR "Error in status register: 0x%X\n", sr);
-      return;
+      return -EIO;
     } else if(sr & 0x1) {
       // FIFO is full so we have to wait
       //  It takes ~1.2us per 4 bits, so ~9.6us per word and the FIFO is 16 deep
       //  Delay between 2 and 10 FIFO elements
+      // For whatever reason this causes hiccups in the transmission so we just
+      //  busy wait instead for now
       //usleep_range(10, 50);
     } else {
       // Put something in to the FIFO
@@ -128,6 +145,37 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
   }
   break;
 
+  case RGBW_STRIP_RENDER_ALL:
+  {
+    rgbw_led_t *payload = devm_kmalloc(dat->device, sizeof(rgbw_led_t) * dat->num_leds, GFP_KERNEL);
+    if(!payload) {
+      ret = -ENOMEM;
+      break;
+    }
+
+    ret = copy_from_user((void*)payload, (void*)arg, sizeof(rgbw_led_t) * dat->num_leds);
+    if(ret) {
+      devm_kfree(dat->device, payload);
+      ret = -EIO;
+      break;
+    }
+    
+    // Then process the color data into PWM data
+    indx = 0;
+    for(i = 0; i < cmd->count; i++) {
+      // R and G seem switched based on what is in the datasheet
+      dat->leds[indx++] = make_pwm_bits(payload[i].g);
+      dat->leds[indx++] = make_pwm_bits(payload[i].r);
+      dat->leds[indx++] = make_pwm_bits(payload[i].b);
+      dat->leds[indx++] = make_pwm_bits(payload[i].w);
+    }
+    devm_kfree(dat->device, payload);
+  
+    // Then send the buffer to the PWM
+    send_pwm_buf(dat);
+  }
+  break;
+
   case RGBW_STRIP_RENDER:
   {
     rgbw_render_t *cmd = devm_kmalloc(dat->device, sizeof(rgbw_render_t), GFP_KERNEL);
@@ -172,36 +220,8 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
         break;
       }
 
-      arr_start = cmd->offset * 4;
-      arr_end = arr_start + cmd->count * 4;
-      arr_size = dat->num_leds * 4;
-
-      // Make sure we won't use too much power
-      ma_used = 0;
-      for(i = 0; i < cmd->count; i++) {
-        if(payload[i].r != 0) ma_used += MA_LED;
-        if(payload[i].g != 0) ma_used += MA_LED;
-        if(payload[i].b != 0) ma_used += MA_LED;
-        if(payload[i].w != 0) ma_used += MA_LED;
-      }
-      for(i = 0; i < arr_size;) {
-        uint32_t val = dat->leds[i++];
-
-        // Don't count the LEDS we are going to change
-        if(i >= arr_start && i < arr_end) {
-          if(val != bit_values[0]) {ma_used += MA_LED;}
-        }
-      }
-      if(ma_used > MAX_CURRENT_MA) {
-        // No good
-        printk(KERN_DEBUG "Too much current (%d > %d)", ma_used, MAX_CURRENT_MA);
-        ret = -EINVAL;
-        break;
-      } else {
-        printk(KERN_DEBUG "Current used %d", ma_used);
-      }
-      
       // Then process the color data into PWM data
+      arr_start = cmd->offset * 4;
       indx = arr_start;
       for(i = 0; i < cmd->count; i++) {
         // R and G seem switched based on what is in the datasheet
@@ -213,7 +233,6 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
       devm_kfree(dat->device, payload);
     }
     devm_kfree(dat->device, cmd);
-
 
     // Then send the buffer to the PWM
     send_pwm_buf(dat);
