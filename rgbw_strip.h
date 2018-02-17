@@ -12,7 +12,8 @@ typedef struct rgbw_render {
 } rgbw_render_t;
 
 #define RGBW_STRIP_RENDER       _IOW('s', 1, rgbw_render_t *)
-#define RGBW_STRIP_RENDER_ALL   _IOW('s', 1, rgbw_led_t *)
-#define RGBW_STRIP_GET_NUM_LEDS _IOR('s', 2, int *)
+#define RGBW_STRIP_RENDER_ALL   _IOW('s', 2, rgbw_led_t *)
+
+#define RGBW_STRIP_GET_NUM_LEDS _IOR('s', 21, int *)
 
 #endif

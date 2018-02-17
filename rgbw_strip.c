@@ -62,6 +62,21 @@ struct rgbw_strip_platform_data {
 #define MA_LED 20
 #define MAX_CURRENT_MA (25 * 1000)
 
+static uint8_t bit_values[] = {0x88, 0x8C, 0xC8, 0xCC};
+// 0xC = 1100
+// 0x8 = 1000
+// LED 1 = 1100 = C
+// LED 0 = 1000 = 8
+static inline uint32_t make_pwm_bits(uint8_t val) {
+  // MSB first
+  uint32_t tmp =
+    ((bit_values[(val>>0) & 0x3] << 0 ) |
+     (bit_values[(val>>2) & 0x3] << 8 ) |
+     (bit_values[(val>>4) & 0x3] << 16) |
+     (bit_values[(val>>6) & 0x3] << 24));
+  return tmp;
+}
+
 static int send_pwm_buf(struct rgbw_strip_platform_data *dat) {
   // Basically just keep pumping data into the FIFO until there is no
   //  more data left
@@ -72,7 +87,7 @@ static int send_pwm_buf(struct rgbw_strip_platform_data *dat) {
   // Check power consumption
   arr_size = dat->num_leds * 4;  
   for(i = 0; i < arr_size;) {
-    if(dat->leds[i++] != bit_values[0]) ma_used += MA_LED;
+    if(dat->leds[i++] != 0x88888888) ma_used += MA_LED;
   }
   if(ma_used > MAX_CURRENT_MA) {
     // No good
@@ -101,6 +116,7 @@ static int send_pwm_buf(struct rgbw_strip_platform_data *dat) {
       writel(dat->leds[i++], dat->pwm_base + FIFO_OFFSET);
     }
   }
+  return 0;
 }
 
 // We keep this around and global so our file handlers have something
@@ -115,21 +131,6 @@ static int rgbw_strip_open(struct inode *inode, struct file *fp) {
 static int rgbw_strip_release(struct inode *inode, struct file *fp) {
     fp->private_data = NULL;
     return 0;
-}
-
-static uint8_t bit_values[] = {0x88, 0x8C, 0xC8, 0xCC};
-// 0xC = 1100
-// 0x8 = 1000
-// LED 1 = 1100 = C
-// LED 0 = 1000 = 8
-static inline uint32_t make_pwm_bits(uint8_t val) {
-  // MSB first
-  uint32_t tmp =
-    ((bit_values[(val>>0) & 0x3] << 0 ) |
-     (bit_values[(val>>2) & 0x3] << 8 ) |
-     (bit_values[(val>>4) & 0x3] << 16) |
-     (bit_values[(val>>6) & 0x3] << 24));
-  return tmp;
 }
 
 static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigned long arg) {
@@ -162,7 +163,7 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
     
     // Then process the color data into PWM data
     indx = 0;
-    for(i = 0; i < cmd->count; i++) {
+    for(i = 0; i < dat->num_leds; i++) {
       // R and G seem switched based on what is in the datasheet
       dat->leds[indx++] = make_pwm_bits(payload[i].g);
       dat->leds[indx++] = make_pwm_bits(payload[i].r);
@@ -180,8 +181,7 @@ static long rgbw_strip_unlocked_ioctl(struct file *fp, unsigned int cmd, unsigne
   {
     rgbw_render_t *cmd = devm_kmalloc(dat->device, sizeof(rgbw_render_t), GFP_KERNEL);
     rgbw_led_t *payload = NULL;
-    uint arr_start = 0, arr_end = 0, arr_size = 0;
-    uint ma_used;
+    uint arr_start = 0;
     if(!cmd) {
       ret = -ENOMEM;
       break;
