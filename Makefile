@@ -17,5 +17,6 @@ clean:
 
 install:
 	cp ${TARGET_BASE}.dtbo /boot/overlays
+	cp ${TARGET_BASE}.ko /lib/modules
 
 .PHONY: clean all

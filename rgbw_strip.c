@@ -4,7 +4,7 @@
 #include <linux/init.h>
 #include <linux/cdev.h>
 #include <linux/platform_device.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/delay.h>
 #include <linux/clk.h>
 #include <linux/of.h>
@@ -94,7 +94,7 @@ static int send_pwm_buf(struct rgbw_strip_platform_data *dat) {
     printk(KERN_DEBUG "Too much current (%d > %d)", ma_used, MAX_CURRENT_MA);
     return -EINVAL;
   } else {
-    printk(KERN_INFO "Current used %d", ma_used);
+    //printk(KERN_INFO "Current used %d", ma_used);
   }
 
   // Send it off it we are good
